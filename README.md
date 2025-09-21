@@ -1,70 +1,308 @@
-# Simple HTTP Proxy — Beginner Guide
+# HTTP Proxy Server
 
-Members: John Enzu Inigo, Anjoe Paglinawan, Mae Nisha Carmel Rendon
+A lightweight, educational HTTP proxy server implementation in C that demonstrates socket programming, process management, and network communication concepts.
 
-This is a small program that sits in the middle between your browser (or curl) and real websites. It reads your request, sends it to the website, gets the website’s reply, and gives it back to you.
+## 📋 Table of Contents
+- [Overview](#overview)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [How It Works](#how-it-works)
+- [Code Structure](#code-structure)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Educational Notes](#educational-notes)
+- [License](#license)
 
-We will use a single file in this project: `proxy.c` (Windows‑only version in your repo). It handles many clients at the same time using Windows threads.
+## 🔍 Overview
 
-Tip: This proxy is HTTP‑only (use URLs that start with http://). HTTPS (https://) is not supported in this version.
+This HTTP proxy server acts as an intermediary between HTTP clients (like web browsers or curl) and web servers. When a client makes a request through the proxy, the server forwards the request to the target server and then relays the response back to the client.
 
-## Quick start (Windows)
-1) Build
-```powershell
-C:\mingw64\bin\gcc.exe -g "c:\Users\johne\OneDrive\Documents\C code\proxy.c" -lws2_32 -o "c:\Users\johne\OneDrive\Documents\C code\proxy.exe"
 ```
-2) Run
-```powershell
-.\proxy.exe 8080
-```
-3) Test with curl
-```powershell
-curl.exe -x http://127.0.0.1:8080 http://example.com/
-```
-If you see HTML in the terminal and the proxy window prints logs (new client, connecting, forwarded, complete), it works!
-
-## What the proxy does (in plain steps)
-1. Start and listen on the port you type (no hard‑coded port).
-2. Wait for a client to connect (any IP address can connect).
-3. Read the first line of the request (like: GET http://example.com/ HTTP/1.1).
-4. If the request is invalid, reply with 400 Bad Request.
-5. If valid, extract three things from the URL: host, port (or 80 by default), and path.
-6. Connect to that host and send the same request the client sent.
-7. Read the server’s reply and send it back to the client. Then close the connection.
-
-## About the code file
-- `proxy.c` is set up in your repo as a Windows‑only proxy using Winsock and a thread‑per‑connection model. It logs each step so you can see what’s happening.
-
-## More curl examples
-- See only the headers
-```powershell
-curl.exe -I -x http://127.0.0.1:8080 http://example.com/
-```
-- Be verbose (show details) and follow redirects
-```powershell
-curl.exe -v -L -x http://127.0.0.1:8080 http://neverssl.com/
-```
-- Test concurrency (run both in separate terminals)
-```powershell
-curl.exe -s -x http://127.0.0.1:8080 http://example.com/ > $env:TEMP\out1.html
-curl.exe -s -x http://127.0.0.1:8080 http://neverssl.com/ > $env:TEMP\out2.html
+Client ↔ Proxy Server ↔ Target Server
 ```
 
-## Where things are in the code (proxy.c)
-- `parse_http_request` — reads METHOD, URL, VERSION from the first line.
-- `parse_url` — pulls out host, optional port (default 80), and path.
-- `connect_to_host` — DNS look‑up and connect using `getaddrinfo`.
-- `process_client_request` — the main flow: read → parse → connect → forward → relay.
+## ✨ Features
 
-## Common problems & quick fixes
-- “curl” shows PowerShell help: use `curl.exe` to run the real curl.
-- No output or errors: try a plain HTTP site like `http://neverssl.com/` or `http://example.com/`.
-- HTTPS fails: expected — this proxy does not implement HTTPS CONNECT.
-- Build error on Windows: ensure `-lws2_32` is present when compiling.
+- **HTTP/1.1 Support**: Handles standard HTTP requests and responses
+- **Concurrent Connections**: Uses process forking to handle multiple clients simultaneously
+- **URL Parsing**: Extracts host, port, and path information from URLs
+- **DNS Resolution**: Automatically resolves hostnames to IP addresses
+- **Error Handling**: Comprehensive error handling with appropriate HTTP status codes
+- **Detailed Logging**: Extensive debug output for monitoring and troubleshooting
+- **Memory Safe**: Proper memory management and buffer handling
+- **Signal Handling**: Prevents zombie processes through proper signal management
 
-## Glossary (super short)
-- Socket — The endpoint you read/write bytes to over the network.
-- Proxy — A middleman program that forwards requests and responses.
-- Thread — A lightweight path of execution that lets your program do many things at once.
+## 📋 Requirements
 
-You now have a working HTTP proxy, a simple way to test it, and a clear map of where to look in the code. If you want, we can add HTTPS support or add timeouts/logging next.
+- **Operating System**: Linux/Unix-based system
+- **Compiler**: GCC (GNU Compiler Collection)
+- **Dependencies**: Standard C libraries (no external dependencies)
+- **Architecture**: x86_64 or compatible
+
+### System Requirements
+```bash
+# Check if you have GCC installed
+gcc --version
+
+# Check if you have standard development tools
+which make
+```
+
+## 🚀 Installation
+
+1. **Clone or download the source code**:
+   ```bash
+   # If using git
+   git clone <repository-url>
+   cd <repository-name>
+   
+   # Or download the proxy.c file directly
+   ```
+
+2. **Compile the proxy server**:
+   ```bash
+   gcc -o proxy proxy.c
+   ```
+
+3. **Make it executable** (if needed):
+   ```bash
+   chmod +x proxy
+   ```
+
+## 💻 Usage
+
+### Starting the Proxy Server
+
+```bash
+./proxy <port>
+```
+
+**Example**:
+```bash
+./proxy 8080
+```
+
+This starts the proxy server listening on port 8080.
+
+### Using the Proxy
+
+#### With curl:
+```bash
+curl -x http://localhost:8080 http://www.example.com
+```
+
+#### With wget:
+```bash
+wget -e http_proxy=http://localhost:8080 http://www.example.com
+```
+
+#### With web browsers:
+Configure your browser's HTTP proxy settings to:
+- **Proxy server**: `localhost`
+- **Port**: `8080` (or whatever port you specified)
+
+### Command Line Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `<port>` | Port number to listen on (1-65535) | `./proxy 3128` |
+
+### Example Session
+
+```bash
+# Terminal 1: Start the proxy
+$ ./proxy 8080
+Proxy server listening on port 8080
+Waiting for client connections...
+
+# Terminal 2: Make a request through the proxy
+$ curl -x http://localhost:8080 http://www.example.com
+<!doctype html>
+<html>
+<head>
+    <title>Example Domain</title>
+...
+```
+
+## 🔧 How It Works
+
+### 1. **Server Initialization**
+- Creates a TCP socket
+- Binds to the specified port
+- Listens for incoming connections
+
+### 2. **Client Connection Handling**
+- Accepts incoming client connections
+- Forks a child process for each client (concurrent handling)
+- Parent process continues listening for new connections
+
+### 3. **Request Processing**
+```
+[Client Request] → [Parse HTTP] → [Extract URL] → [DNS Resolution] → [Connect to Target]
+```
+
+### 4. **Data Forwarding**
+```
+[Client] ←→ [Proxy] ←→ [Target Server]
+```
+
+### 5. **Connection Cleanup**
+- Closes all sockets
+- Terminates child process
+- Parent process cleans up zombie processes
+
+## 📁 Code Structure
+
+```
+proxy.c
+├── Headers & Includes
+├── handle_sigchld()      # Zombie process cleanup
+├── parse_url()           # URL parsing and validation
+├── handle_client()       # Main client handling logic
+└── main()               # Server initialization and main loop
+```
+
+### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `main()` | Server setup, socket creation, main accept loop |
+| `handle_client()` | Process individual client requests |
+| `parse_url()` | Extract host, port, and path from URLs |
+| `handle_sigchld()` | Clean up terminated child processes |
+
+## 🧪 Testing
+
+### Basic Functionality Test
+```bash
+# Start proxy
+./proxy 8080 &
+
+# Test with simple HTTP request
+curl -x http://localhost:8080 http://www.example.com
+
+# Test with different websites
+curl -x http://localhost:8080 http://info.cern.ch/
+curl -x http://localhost:8080 http://www.google.com
+```
+
+### Concurrent Connection Test
+```bash
+# Test multiple simultaneous connections
+curl -x http://localhost:8080 http://www.example.com &
+curl -x http://localhost:8080 http://info.cern.ch/ &
+curl -x http://localhost:8080 http://www.google.com &
+wait
+```
+
+### Error Handling Test
+```bash
+# Test with invalid hostname
+curl -x http://localhost:8080 http://this-host-does-not-exist.com
+
+# Test with invalid port
+curl -x http://localhost:8080 http://www.example.com:99999
+```
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+#### "Address already in use" error
+```bash
+# Solution: Kill existing proxy processes
+pkill -f "./proxy"
+# Or wait a few seconds and try again
+```
+
+#### "Permission denied" on low ports
+```bash
+# Ports below 1024 require root privileges
+sudo ./proxy 80
+# Better: use ports above 1024
+./proxy 8080
+```
+
+#### "Connection refused" errors
+```bash
+# Check if proxy is actually running
+ps aux | grep proxy
+
+# Check if port is open
+netstat -tlnp | grep :8080
+```
+
+### Debug Output
+
+The proxy provides detailed logging output:
+
+```
+[MAIN] New client connected from 127.0.0.1:45678
+[MAIN] Forked child process 12345 to handle client
+[CHILD 12345] Reading request from client...
+[CHILD 12345] Received 130 bytes from client
+[CHILD 12345] Parsed HTTP request: GET http://www.example.com/ HTTP/1.1
+[CHILD 12345] Parsed URL - Host: www.example.com, Port: 80, Path: /
+[CHILD 12345] Connecting to target server www.example.com:80...
+[CHILD 12345] Resolving hostname www.example.com...
+[CHILD 12345] Host resolved to IP: 93.184.216.34
+[CHILD 12345] Connected to target server successfully!
+[CHILD 12345] Forwarding client request (130 bytes) to server...
+[CHILD 12345] Request sent to server, now forwarding response back to client...
+[CHILD 12345] Forwarded 1256 bytes of response data to client
+[CHILD 12345] Connection completed, cleaning up...
+```
+
+## 📚 Educational Notes
+
+### Networking Concepts Demonstrated
+- **Socket Programming**: Creating, binding, listening, accepting connections
+- **TCP/IP Communication**: Reliable, connection-oriented data transfer
+- **DNS Resolution**: Converting hostnames to IP addresses
+- **HTTP Protocol**: Parsing and forwarding HTTP requests/responses
+- **Process Forking**: Creating child processes for concurrent handling
+- **Signal Handling**: Managing process lifecycle and cleanup
+
+### C Programming Concepts
+- **Pointers and Arrays**: String manipulation and memory management
+- **Structures**: Network address structures (`sockaddr_in`, `hostent`)
+- **System Calls**: Low-level operating system interface
+- **Error Handling**: Checking return values and handling failures
+- **Memory Management**: Proper allocation, copying, and cleanup
+
+### Security Considerations
+⚠️ **Educational Purpose Only**: This proxy is designed for learning and should not be used in production environments without additional security measures:
+
+- No authentication or access control
+- No HTTPS/SSL support
+- No request filtering or validation
+- No rate limiting or abuse protection
+- Potential for memory leaks in error conditions
+
+## 📄 License
+
+This project is provided for educational purposes. Feel free to use, modify, and distribute for learning and non-commercial purposes.
+
+---
+
+## 📞 Support
+
+If you encounter issues or have questions:
+
+1. Check the [Troubleshooting](#troubleshooting) section
+2. Review the debug output for error messages
+3. Verify your system meets the [Requirements](#requirements)
+4. Test with simple HTTP sites first (avoid HTTPS)
+
+## 🔗 Additional Resources
+
+- [Beej's Guide to Network Programming](https://beej.us/guide/bgnet/)
+- [HTTP/1.1 Specification (RFC 2616)](https://tools.ietf.org/html/rfc2616)
+- [Socket Programming Tutorial](https://www.tutorialspoint.com/unix_sockets/index.htm)
+- [C Programming Language Reference](https://en.cppreference.com/w/c)
+
+---
+
+**Happy Learning! 🎓**
