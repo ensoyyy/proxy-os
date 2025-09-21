@@ -1,353 +1,247 @@
-/**
-Members:
-John Enzu Inigo
-Anjoe Paglinawan
-Mae Nisha Carmel Rendon
- */
-
-/**
- * Simple HTTP Proxy Server (Windows-only)
- *
- * Notes
- * - Handles HTTP (plaintext) only. HTTPS CONNECT tunneling is NOT implemented.
- * - Multi-client handling: thread-per-connection (Windows threads).
- * 
- * Build (MinGW):
- * C:\\mingw64\\bin\\gcc.exe -g "c:\\Users\\johne\\OneDrive\\Documents\\C code\\proxy.c" -lws2_32 -o "c:\\Users\\johne\\OneDrive\\Documents\\C code\\proxy.exe"
- * 
- * Run:
- * .\proxy.exe 8080
- * 
- * Test:
- * Browser: configure HTTP proxy 127.0.0.1:8080; open http://example.com (HTTP only).
- * Curl: 
- *  -Fetch a simple HTTP page: curl.exe -x http://127.0.0.1:8080 http://example.com/
- *  -Fetch headers only (quieter): curl.exe -I -x http://127.0.0.1:8080 http://example.com/
- *  -Verbose mode (see request/response details)
- *      >Useful for debugging: curl.exe -I -x http://127.0.0.1:8080 http://example.com/
- *  -Follow redirects (some sites redirect)
- *      >Add -L to follow Location headers: curl.exe -v -L -x http://127.0.0.1:8080 http://example.com/
- *  -Compare direct vs via proxy 
- *    >Direct(no proxy): curl.exe -I http://example.com/
- *    >Direct(via proxy): curl.exe -I -x http://127.0.0.1:8080 http://example.com/
- *  -Concurrent requests (prove threading works)
- *     >Fetch two pages simultaneously: curl.exe -s -x http://127.0.0.1:8080 http://example.com/ > $env:TEMP\out1.html 
- *                                      curl.exe -s -x http://127.0.0.1:8080 http://neverssl.com/ > $env:TEMP\out2.html
+/*
+ * HTTP Proxy Server
+ * Compile: gcc -o proxy proxy.c
+ * Run: ./proxy <port>
+ * Test: curl -x http://localhost:<port> http://www.example.com
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <winsock2.h>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>   // CloseHandle
-#include <ws2tcpip.h>
-#include <process.h>  // _beginthreadex
-#pragma comment(lib, "ws2_32.lib")
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define BUFFER_SIZE 4096
-#define MAX_PENDING 10
-#define DEFAULT_HTTP_PORT 80
 
-typedef SOCKET socket_t;
-#define CLOSESOCK closesocket
-
-// URL components
-typedef struct {
-    char host[256];
-    int port;
-    char path[1024];
-} URL_Info;
-
-// Forward declarations
-static void process_client_request(socket_t client_sock);
-
-// Parse the request line: METHOD URL VERSION
-static int parse_http_request(const char *request, char *method, char *url, char *version) {
-    char temp[BUFFER_SIZE];
-    strncpy(temp, request, sizeof(temp) - 1);
-    temp[sizeof(temp) - 1] = '\0';
-
-    char *token = strtok(temp, " "); // METHOD
-    if (!token) return -1;
-    strcpy(method, token);
-
-    token = strtok(NULL, " "); // URL
-    if (!token) return -1;
-    strcpy(url, token);
-
-    token = strtok(NULL, "\r\n"); // VERSION
-    if (!token) return -1;
-    strcpy(version, token);
-
-    return 0;
+// Handle zombie processes
+void handle_sigchld(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
-// Parse URL without modifying input
-static int parse_url(const char *url, URL_Info *url_info) {
-    if (!url || !*url) return -1;
-
-    url_info->host[0] = '\0';
-    url_info->port = DEFAULT_HTTP_PORT;
-    strcpy(url_info->path, "/");
-
-    const char *p = url;
-    const char *scheme = "http://";
-    size_t scheme_len = strlen(scheme);
-    if (strncmp(p, scheme, scheme_len) == 0) p += scheme_len;
-
-    const char *slash = strchr(p, '/');
-    const char *hostport_end = slash ? slash : p + strlen(p);
-
-    if (slash && *(slash) != '\0') {
-        strncpy(url_info->path, slash, sizeof(url_info->path) - 1);
-        url_info->path[sizeof(url_info->path) - 1] = '\0';
+// Parse URL to extract host, port, and path
+void parse_url(char *url, char *host, int *port, char *path) {
+    *port = 80;  // default HTTP port
+    strcpy(path, "/");  // default path
+    
+    // Work with a copy to avoid modifying the original URL
+    char url_copy[1024];
+    strcpy(url_copy, url);
+    
+    // Skip http:// if present
+    char *start = (strncmp(url_copy, "http://", 7) == 0) ? url_copy + 7 : url_copy;
+    
+    // Find path
+    char *path_start = strchr(start, '/');
+    if (path_start) {
+        strcpy(path, path_start);
+        *path_start = '\0';  // Terminate host part
     }
-
-    const char *colon = NULL;
-    for (const char *it = p; it < hostport_end; ++it) {
-        if (*it == ':') { colon = it; break; }
+    
+    // Check for port
+    char *port_start = strchr(start, ':');
+    if (port_start) {
+        *port_start = '\0';
+        *port = atoi(port_start + 1);
     }
-
-    if (colon) {
-        size_t host_len = (size_t)(colon - p);
-        if (host_len >= sizeof(url_info->host)) host_len = sizeof(url_info->host) - 1;
-        memcpy(url_info->host, p, host_len);
-        url_info->host[host_len] = '\0';
-
-        const char *port_str = colon + 1;
-        char port_buf[16];
-        size_t port_len = (size_t)(hostport_end - port_str);
-        if (port_len >= sizeof(port_buf)) port_len = sizeof(port_buf) - 1;
-        memcpy(port_buf, port_str, port_len);
-        port_buf[port_len] = '\0';
-        int parsed_port = atoi(port_buf);
-        if (parsed_port > 0 && parsed_port <= 65535) url_info->port = parsed_port;
-    } else {
-        size_t host_len = (size_t)(hostport_end - p);
-        if (host_len >= sizeof(url_info->host)) host_len = sizeof(url_info->host) - 1;
-        memcpy(url_info->host, p, host_len);
-        url_info->host[host_len] = '\0';
-    }
-
-    return url_info->host[0] ? 0 : -1;
+    
+    strcpy(host, start);
 }
 
-// Connect using getaddrinfo; returns INVALID_SOCKET on error
-static socket_t connect_to_host(const char *hostname, int port) {
-    struct addrinfo hints; 
-    struct addrinfo *res = NULL, *rp = NULL;
-    char port_str[16];
-
-    snprintf(port_str, sizeof(port_str), "%d", port);
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    int gai_err = getaddrinfo(hostname, port_str, &hints, &res);
-    if (gai_err != 0 || !res) {
-        fprintf(stderr, "Error resolving host %s: %s\n", hostname, gai_strerrorA(gai_err));
-        return INVALID_SOCKET;
-    }
-
-    socket_t connected = INVALID_SOCKET;
-    for (rp = res; rp != NULL; rp = rp->ai_next) {
-        socket_t s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (s == INVALID_SOCKET) continue;
-        if (connect(s, rp->ai_addr, (int)rp->ai_addrlen) == SOCKET_ERROR) {
-            CLOSESOCK(s);
-            continue;
-        }
-        connected = s;
-        break;
-    }
-
-    freeaddrinfo(res);
-
-    if (connected == INVALID_SOCKET) {
-        fprintf(stderr, "Error connecting to remote server\n");
-    } else {
-        printf("[Proxy] Connected to %s:%d\n", hostname, port);
-    }
-    return connected;
-}
-
-static void send_error_response(socket_t client_sock, int error_code, const char *error_msg) {
-    char body[256];
-    int body_len = snprintf(body, sizeof(body),
-        "<html><body><h1>%d %s</h1></body></html>\r\n", error_code, error_msg);
-    if (body_len < 0) body_len = 0;
-
-    char header[256];
-    int header_len = snprintf(header, sizeof(header),
-        "HTTP/1.0 %d %s\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-        error_code, error_msg, body_len);
-    if (header_len > 0) send(client_sock, header, (int)header_len, 0);
-    if (body_len > 0) send(client_sock, body, (int)body_len, 0);
-}
-
-// Thread entry: handle one client connection
-static unsigned __stdcall client_thread(void *arg) {
-    socket_t s = (socket_t)(uintptr_t)arg;
-    process_client_request(s);
-    CLOSESOCK(s);
-    return 0;
-}
-
-static void process_client_request(socket_t client_sock) {
+// Handle client request in child process
+void handle_client(int client_sock) {
     char buffer[BUFFER_SIZE];
     char method[16], url[1024], version[16];
-    char request[BUFFER_SIZE];
-    URL_Info url_info;
-
-    int bytes_received = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
-    if (bytes_received <= 0) {
-        printf("[Proxy] Client disconnected or error receiving data\n");
-        return;
+    char host[256], path[1024];
+    int port, server_sock;
+    struct hostent *server;
+    struct sockaddr_in server_addr;
+    
+    // Read request from client
+    printf("[CHILD %d] Reading request from client...\n", getpid());
+    memset(buffer, 0, BUFFER_SIZE);
+    int bytes = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
+    
+    if (bytes <= 0) {
+        printf("[CHILD %d] No data received from client\n", getpid());
+        close(client_sock);
+        exit(1);
     }
-    buffer[bytes_received] = '\0';
-
-    printf("[Proxy] Received request from client:\n%s\n", buffer);
-    strncpy(request, buffer, sizeof(request) - 1);
-    request[sizeof(request) - 1] = '\0';
-
-    if (parse_http_request(buffer, method, url, version) < 0) {
-        printf("[Proxy] Invalid HTTP request\n");
-        send_error_response(client_sock, 400, "Bad Request");
-        return;
+    
+    printf("[CHILD %d] Received %d bytes from client\n", getpid(), bytes);
+    
+    // Parse HTTP request line
+    if (sscanf(buffer, "%15s %1023s %15s", method, url, version) != 3) {
+        printf("[CHILD %d] Invalid HTTP request format\n", getpid());
+        char *error = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(client_sock, error, strlen(error), 0);
+        close(client_sock);
+        exit(1);
     }
-
-    printf("[Proxy] Method: %s, URL: %s, Version: %s\n", method, url, version);
-
-    if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "HEAD") != 0) {
-        printf("[Proxy] Unsupported method: %s\n", method);
-        send_error_response(client_sock, 501, "Not Implemented");
-        return;
+    
+    printf("[CHILD %d] Parsed HTTP request: %s %s %s\n", getpid(), method, url, version);
+    
+    // Debug: Print the first line of the HTTP request
+    char first_line[256];
+    strncpy(first_line, buffer, 255);
+    first_line[255] = '\0';
+    char *newline = strchr(first_line, '\r');
+    if (newline) *newline = '\0';
+    newline = strchr(first_line, '\n');
+    if (newline) *newline = '\0';
+    printf("[CHILD %d] HTTP Request Line: '%s'\n", getpid(), first_line);
+    
+    // Parse URL to extract host and port for connection
+    parse_url(url, host, &port, path);
+    
+    printf("[CHILD %d] Parsed URL - Host: %s, Port: %d, Path: %s\n", getpid(), host, port, path);
+    printf("[CHILD %d] Connecting to target server %s:%d...\n", getpid(), host, port);
+    
+    // Connect to target server
+    server_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_sock < 0) {
+        printf("[CHILD %d] Failed to create server socket\n", getpid());
+        perror("Failed to create server socket");
+        char *error = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+        send(client_sock, error, strlen(error), 0);
+        close(client_sock);
+        exit(1);
     }
-
-    if (parse_url(url, &url_info) < 0) {
-        printf("[Proxy] Error parsing URL\n");
-        send_error_response(client_sock, 400, "Bad Request");
-        return;
+    
+    printf("[CHILD %d] Resolving hostname %s...\n", getpid(), host);
+    server = gethostbyname(host);
+    if (!server) {
+        printf("[CHILD %d] Failed to resolve host: %s\n", getpid(), host);
+        char *error = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+        send(client_sock, error, strlen(error), 0);
+        close(server_sock);
+        close(client_sock);
+        exit(1);
     }
-
-    printf("[Proxy] Connecting to host: %s, port: %d, path: %s\n", url_info.host, url_info.port, url_info.path);
-
-    socket_t server_sock = connect_to_host(url_info.host, url_info.port);
-    if (server_sock == INVALID_SOCKET) {
-        send_error_response(client_sock, 502, "Bad Gateway");
-        return;
+    
+    printf("[CHILD %d] Host resolved to IP: %s\n", getpid(), inet_ntoa(*((struct in_addr*)server->h_addr)));
+    
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    memcpy(&server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    server_addr.sin_port = htons(port);
+    
+    if (connect(server_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        printf("[CHILD %d] Failed to connect to target server %s:%d\n", getpid(), host, port);
+        perror("Failed to connect to target server");
+        char *error = "HTTP/1.1 502 Bad Gateway\r\n\r\n";
+        send(client_sock, error, strlen(error), 0);
+        close(server_sock);
+        close(client_sock);
+        exit(1);
     }
-
-    int bytes_sent = send(server_sock, request, (int)strlen(request), 0);
-    if (bytes_sent < 0) {
-        fprintf(stderr, "Error sending request to server: %d\n", WSAGetLastError());
-        send_error_response(client_sock, 502, "Bad Gateway");
-        CLOSESOCK(server_sock);
-        return;
+    
+    printf("[CHILD %d] Connected to target server successfully!\n", getpid());
+    
+    // Forward the original request from client to server
+    // As per assignment requirements: "send the HTTP request that it received from the client"
+    printf("[CHILD %d] Forwarding client request (%d bytes) to server...\n", getpid(), bytes);
+    send(server_sock, buffer, bytes, 0);
+    
+    printf("[CHILD %d] Request sent to server, now forwarding response back to client...\n", getpid());
+    
+    // Forward response back to client
+    int total_bytes = 0;
+    while ((bytes = recv(server_sock, buffer, BUFFER_SIZE, 0)) > 0) {
+        send(client_sock, buffer, bytes, 0);
+        total_bytes += bytes;
     }
-
-    printf("[Proxy] Forwarded request to server\n");
-
-    int n;
-    while ((n = recv(server_sock, buffer, BUFFER_SIZE, 0)) > 0) {
-        int m = send(client_sock, buffer, n, 0);
-        if (m < 0) {
-            fprintf(stderr, "Error sending response to client: %d\n", WSAGetLastError());
-            break;
-        }
-    }
-
-    printf("[Proxy] Transaction complete, closing connections\n");
-    CLOSESOCK(server_sock);
+    
+    printf("[CHILD %d] Forwarded %d bytes of response data to client\n", getpid(), total_bytes);
+    printf("[CHILD %d] Connection completed, cleaning up...\n", getpid());
+    
+    // Close connections
+    close(server_sock);
+    close(client_sock);
+    exit(0);
 }
 
 int main(int argc, char *argv[]) {
+    int proxy_sock, client_sock, port, opt = 1;
+    struct sockaddr_in proxy_addr, client_addr;
+    socklen_t client_len;
+    
+    // Check command line argument
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
-        return 1;
+        exit(1);
     }
-
-    int port = atoi(argv[1]);
+    
+    port = atoi(argv[1]);
     if (port <= 0 || port > 65535) {
-        fprintf(stderr, "Error: Invalid port number\n");
-        return 1;
+        fprintf(stderr, "Invalid port number\n");
+        exit(1);
     }
-
-    WSADATA wsaData;
-    int wsaerr = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (wsaerr != 0) {
-        fprintf(stderr, "WSAStartup failed with error: %d\n", wsaerr);
-        return 1;
+    
+    // Setup signal handler for zombie prevention
+    signal(SIGCHLD, handle_sigchld);
+    signal(SIGPIPE, SIG_IGN);
+    
+    // Create socket
+    proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (proxy_sock < 0) {
+        perror("socket");
+        exit(1);
     }
-
-    socket_t proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (proxy_sock == INVALID_SOCKET) {
-        fprintf(stderr, "Error creating socket: %d\n", WSAGetLastError());
-        WSACleanup();
-        return 1;
-    }
-
-    int opt = 1;
-    if (setsockopt(proxy_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)) < 0) {
-        fprintf(stderr, "Error setting socket options: %d\n", WSAGetLastError());
-        CLOSESOCK(proxy_sock);
-        WSACleanup();
-        return 1;
-    }
-
-    struct sockaddr_in proxy_addr;
+    
+    // Allow socket reuse
+    setsockopt(proxy_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    // Setup proxy address
     memset(&proxy_addr, 0, sizeof(proxy_addr));
     proxy_addr.sin_family = AF_INET;
     proxy_addr.sin_addr.s_addr = INADDR_ANY;
     proxy_addr.sin_port = htons(port);
-
+    
+    // Bind socket
     if (bind(proxy_sock, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr)) < 0) {
-        fprintf(stderr, "Error binding socket: %d\n", WSAGetLastError());
-        CLOSESOCK(proxy_sock);
-        WSACleanup();
-        return 1;
+        perror("bind");
+        exit(1);
     }
-
-    if (listen(proxy_sock, MAX_PENDING) < 0) {
-        fprintf(stderr, "Error listening on socket: %d\n", WSAGetLastError());
-        CLOSESOCK(proxy_sock);
-        WSACleanup();
-        return 1;
+    
+    // Listen for connections
+    if (listen(proxy_sock, 10) < 0) {
+        perror("listen");
+        exit(1);
     }
-
-    printf("[Proxy] Windows Proxy Server started on port %d\n", port);
-    printf("[Proxy] Waiting for client connections...\n");
-
+    
+    printf("Proxy server listening on port %d\n", port);
+    printf("Waiting for client connections...\n");
+    
+    // Main server loop
     while (1) {
-        struct sockaddr_in client_addr;
-        int client_len = sizeof(client_addr);
-        socket_t client_sock = accept(proxy_sock, (struct sockaddr *)&client_addr, &client_len);
-        if (client_sock == INVALID_SOCKET) {
-            fprintf(stderr, "Error accepting connection: %d\n", WSAGetLastError());
-            continue;
-        }
-
-        printf("[Proxy] New client connected from %s:%d\n",
+        client_len = sizeof(client_addr);
+        client_sock = accept(proxy_sock, (struct sockaddr *)&client_addr, &client_len);
+        
+        if (client_sock < 0) continue;
+        
+        printf("\n[MAIN] New client connected from %s:%d\n", 
                inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
-        // Spawn a detached thread to handle the client, allowing concurrent clients
-        unsigned threadId = 0;
-        uintptr_t th = _beginthreadex(NULL, 0, client_thread, (void*)(uintptr_t)client_sock, 0, &threadId);
-
-        if (th == 0) {
-            // Fallback to synchronous handling if thread creation fails
-            fprintf(stderr, "Failed to create thread; handling client synchronously\n");
-            process_client_request(client_sock);
-            CLOSESOCK(client_sock);
-        } else {
-            CloseHandle((HANDLE)th); // Detach thread handle
+        
+        // Fork child process to handle client
+        pid_t pid = fork();
+        
+        if (pid == 0) {
+            // Child process
+            printf("[CHILD %d] Handling client request...\n", getpid());
+            close(proxy_sock);
+            handle_client(client_sock);
+        } else if (pid > 0) {
+            // Parent process
+            printf("[MAIN] Forked child process %d to handle client\n", pid);
+            close(client_sock);
         }
     }
-
-    CLOSESOCK(proxy_sock);
-    WSACleanup();
+    
+    close(proxy_sock);
     return 0;
 }
